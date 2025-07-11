@@ -4,7 +4,7 @@ ini_set('display_errors', 1);
 
 // Configuration Constants - Update these with your values
 define('TENANT_ID', 'x');
-define('CLIENT_ID', 'y');
+define('CLIENT_ID', 'w');
 define('CLIENT_SECRET', 'z');
 define('SHAREPOINT_SITE_ID', '11adac3a-680d-4a72-9acf-6699524b1d7f'); // Or use site URL format
 define('DOCUMENT_LIBRARY_NAME', 'CasesandIncidentsFiles'); // Name of your document library
@@ -188,7 +188,65 @@ function discoverSharePointLibraries($accessToken) {
     return $allResults;
 }
 
-// Simplified createSharePointFolder function that uses drives instead of lists
+// Function to check if a folder exists in a specific drive
+function checkFolderExists($folderName, $driveId, $accessToken) {
+    // Use the children endpoint to get all items in the root folder
+    $childrenUrl = "https://graph.microsoft.com/v1.0/drives/" . $driveId . "/root/children";
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $childrenUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Authorization: Bearer ' . $accessToken,
+        'Accept: application/json'
+    ]);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+    
+    $GLOBALS['debug_info']['folder_existence_check'] = [
+        'search_url' => $childrenUrl,
+        'folder_name_searching_for' => $folderName,
+        'http_code' => $httpCode,
+        'curl_error' => $curlError,
+        'response_length' => strlen($response)
+    ];
+    
+    if ($curlError || $httpCode !== 200) {
+        $GLOBALS['debug_info']['folder_existence_check']['error'] = 'Failed to get children list';
+        return false; // Error checking, assume doesn't exist
+    }
+    
+    $data = json_decode($response, true);
+    
+    if (!isset($data['value'])) {
+        $GLOBALS['debug_info']['folder_existence_check']['error'] = 'No value array in response';
+        return false;
+    }
+    
+    // Check each item to see if it's a folder with our target name
+    $foundFolders = [];
+    foreach ($data['value'] as $item) {
+        // Check if it's a folder and if the name matches exactly
+        if (isset($item['folder']) && isset($item['name'])) {
+            $foundFolders[] = $item['name'];
+            if (strcasecmp($item['name'], $folderName) === 0) {
+                $GLOBALS['debug_info']['folder_existence_check']['found_exact_match'] = $item['name'];
+                return true;
+            }
+        }
+    }
+    
+    $GLOBALS['debug_info']['folder_existence_check']['all_folders_found'] = $foundFolders;
+    $GLOBALS['debug_info']['folder_existence_check']['exact_match_found'] = false;
+    
+    return false;
+}
+
+// Enhanced function to create folder with existence check
 function createSharePointFolder($folderName, $accessToken) {
     $GLOBALS['debug_info']['api']['function_inputs'] = [
         'folder_name_received' => $folderName,
@@ -208,13 +266,7 @@ function createSharePointFolder($folderName, $accessToken) {
         ];
     }
     
-    $folderData = [
-        'name' => $folderName,
-        'folder' => new stdClass(),
-        '@microsoft.graph.conflictBehavior' => 'rename'
-    ];
-    
-    // Step 1: Get all drives (this is more reliable than lists)
+    // Step 1: Get all drives
     $drivesUrl = "https://graph.microsoft.com/v1.0/sites/" . SHAREPOINT_SITE_ID . "/drives";
     
     $ch = curl_init();
@@ -235,10 +287,11 @@ function createSharePointFolder($folderName, $accessToken) {
         'url' => $drivesUrl,
         'http_code' => $httpCode,
         'curl_error' => $curlError,
-        'response' => $response
+        'response_length' => strlen($response)
     ];
     
     $targetDriveId = null;
+    $targetDriveName = '';
     $availableDrives = [];
     
     if (!$curlError && $httpCode === 200) {
@@ -251,14 +304,16 @@ function createSharePointFolder($folderName, $accessToken) {
                     'driveType' => $drive['driveType']
                 ];
                 
-                // Look for our target library - be more flexible with matching
+                // Look for our target library
                 $driveName = strtolower($drive['name']);
                 if (stripos($driveName, 'casesandincidentsfiles') !== false ||
                     stripos($driveName, 'cases and incidents files') !== false ||
                     stripos($driveName, 'cases') !== false && stripos($driveName, 'incidents') !== false ||
                     stripos($driveName, 'case') !== false && stripos($driveName, 'incident') !== false) {
                     $targetDriveId = $drive['id'];
+                    $targetDriveName = $drive['name'];
                     $GLOBALS['debug_info']['target_drive_found'] = $drive;
+                    break; // Use the first match
                 }
             }
         }
@@ -266,95 +321,107 @@ function createSharePointFolder($folderName, $accessToken) {
     
     $GLOBALS['debug_info']['available_drives'] = $availableDrives;
     
-    // Step 2: Build list of endpoints to try
-    $endpointsToTry = [];
-    
-    if ($targetDriveId) {
-        // Use the specific drive we found
-        $endpointsToTry[] = [
-            'url' => "https://graph.microsoft.com/v1.0/drives/" . $targetDriveId . "/root/children",
-            'description' => 'Target drive (found by name matching)'
-        ];
-    }
-    
-    // Add other drives as fallbacks
-    foreach ($availableDrives as $drive) {
-        if ($drive['driveType'] === 'documentLibrary' && $drive['id'] !== $targetDriveId) {
-            $endpointsToTry[] = [
-                'url' => "https://graph.microsoft.com/v1.0/drives/" . $drive['id'] . "/root/children",
-                'description' => 'Drive: ' . $drive['name']
-            ];
-        }
-    }
-    
-    // Add default site drive as last resort
-    $endpointsToTry[] = [
-        'url' => "https://graph.microsoft.com/v1.0/sites/" . SHAREPOINT_SITE_ID . "/drive/root/children",
-        'description' => 'Default site drive'
-    ];
-    
-    // Try each endpoint until one works
-    foreach ($endpointsToTry as $index => $endpoint) {
-        $GLOBALS['debug_info']['api']['attempt_' . $index] = [
-            'endpoint' => $endpoint['url'],
-            'description' => $endpoint['description'],
-            'folder_data' => $folderData
-        ];
-        
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $endpoint['url']);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($folderData));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Authorization: Bearer ' . $accessToken,
-            'Content-Type: application/json',
-            'Accept: application/json'
-        ]);
-        
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlError = curl_error($ch);
-        curl_close($ch);
-        
-        $GLOBALS['debug_info']['api']['attempt_' . $index]['response'] = [
-            'http_code' => $httpCode,
-            'curl_error' => $curlError,
-            'response' => $response
-        ];
-        
-        // Check if this attempt was successful
-        if (($httpCode === 201 || $httpCode === 200) && !$curlError) {
-            $responseData = json_decode($response, true);
-            $GLOBALS['debug_info']['api']['successful_endpoint'] = $endpoint;
-            
-            return [
-                'success' => true,
-                'httpCode' => $httpCode,
-                'response' => $responseData,
-                'location' => $endpoint['description'],
-                'debug_info' => $GLOBALS['debug_info']
-            ];
-        }
-        
-        // Log the error for this attempt
-        if ($response) {
-            $responseData = json_decode($response, true);
-            if (isset($responseData['error'])) {
-                $GLOBALS['debug_info']['errors'][] = "Endpoint {$index} ({$endpoint['description']}): " . 
-                    $responseData['error']['code'] . " - " . $responseData['error']['message'];
+    // If no target drive found, use the default drive
+    if (!$targetDriveId) {
+        // Use the first document library drive or default drive
+        foreach ($availableDrives as $drive) {
+            if ($drive['driveType'] === 'documentLibrary') {
+                $targetDriveId = $drive['id'];
+                $targetDriveName = $drive['name'];
+                $GLOBALS['debug_info']['fallback_drive_used'] = $drive;
+                break;
             }
         }
     }
     
-    // If we get here, all attempts failed
-    $GLOBALS['debug_info']['errors'][] = "All endpoints failed to create folder";
+    if (!$targetDriveId) {
+        $GLOBALS['debug_info']['errors'][] = "No suitable drive found";
+        return [
+            'success' => false,
+            'httpCode' => 0,
+            'response' => ['error' => ['message' => 'No suitable document library found']],
+            'debug_info' => $GLOBALS['debug_info']
+        ];
+    }
+    
+    // Step 2: Check if folder already exists
+    $folderExists = checkFolderExists($folderName, $targetDriveId, $accessToken);
+    
+    if ($folderExists) {
+        $GLOBALS['debug_info']['folder_already_exists'] = true;
+        return [
+            'success' => true,
+            'already_exists' => true,
+            'httpCode' => 200,
+            'response' => ['message' => 'Folder already exists'],
+            'location' => $targetDriveName,
+            'debug_info' => $GLOBALS['debug_info']
+        ];
+    }
+    
+    // Step 3: Create the folder since it doesn't exist
+    $folderData = [
+        'name' => $folderName,
+        'folder' => new stdClass(),
+        '@microsoft.graph.conflictBehavior' => 'fail' // Changed from 'rename' to 'fail'
+    ];
+    
+    $createUrl = "https://graph.microsoft.com/v1.0/drives/" . $targetDriveId . "/root/children";
+    
+    $GLOBALS['debug_info']['api']['folder_creation'] = [
+        'endpoint' => $createUrl,
+        'drive_name' => $targetDriveName,
+        'folder_data' => $folderData
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $createUrl);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($folderData));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Authorization: Bearer ' . $accessToken,
+        'Content-Type: application/json',
+        'Accept: application/json'
+    ]);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+    
+    $GLOBALS['debug_info']['api']['folder_creation']['response'] = [
+        'http_code' => $httpCode,
+        'curl_error' => $curlError,
+        'response' => $response
+    ];
+    
+    // Check if creation was successful
+    if (($httpCode === 201 || $httpCode === 200) && !$curlError) {
+        $responseData = json_decode($response, true);
+        
+        return [
+            'success' => true,
+            'already_exists' => false,
+            'httpCode' => $httpCode,
+            'response' => $responseData,
+            'location' => $targetDriveName,
+            'debug_info' => $GLOBALS['debug_info']
+        ];
+    }
+    
+    // Creation failed
+    $responseData = json_decode($response, true);
+    if (isset($responseData['error'])) {
+        $GLOBALS['debug_info']['errors'][] = "Folder creation failed: " . 
+            $responseData['error']['code'] . " - " . $responseData['error']['message'];
+    }
     
     return [
         'success' => false,
-        'httpCode' => $httpCode ?? 0,
-        'response' => $responseData ?? ['error' => ['message' => 'All creation attempts failed']],
+        'httpCode' => $httpCode,
+        'response' => $responseData ?? ['error' => ['message' => 'Folder creation failed']],
         'debug_info' => $GLOBALS['debug_info']
     ];
 }
@@ -486,7 +553,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caseid'])) {
             $GLOBALS['debug_info']['errors'][] = 'Case ID was empty';
         } else {
             // Sanitize folder name (remove invalid characters)
-            // Fixed: Escaped the backslash properly in the regex pattern
             $folderName = preg_replace('/[<>:"\/\\\\|?*]/', '_', $caseId);
             
             // Add debug info for the case ID processing
@@ -501,14 +567,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caseid'])) {
             $accessToken = getAccessToken();
             
             if ($accessToken) {
-                // Create folder
+                // Create folder (this now includes existence check)
                 $result = createSharePointFolder($folderName, $accessToken);
                 
                 if ($result['success']) {
                     $location = isset($result['location']) ? " in " . $result['location'] : "";
-                    $message = "Folder '{$folderName}' created successfully{$location}!";
-                    $messageType = 'success';
-                    $folderCreated = true;
+                    
+                    if (isset($result['already_exists']) && $result['already_exists']) {
+                        // Folder already exists
+                        $message = "Folder '{$folderName}' already exists{$location}. No action needed.";
+                        $messageType = 'warning'; // Use warning style for "already exists"
+                        $folderCreated = false; // Don't clear the form since no new folder was created
+                    } else {
+                        // Folder was successfully created
+                        $message = "Folder '{$folderName}' created successfully{$location}!";
+                        $messageType = 'success';
+                        $folderCreated = true;
+                    }
                 } else {
                     $message = "Failed to create folder. HTTP Code: " . $result['httpCode'];
                     if (isset($result['response']['error'])) {
@@ -707,6 +782,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caseid'])) {
             border-left: 4px solid #E53E3E;
         }
 
+        .alert-warning {
+            background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(217, 119, 6, 0.1));
+            color: #D97706;
+            border-left: 4px solid #F59E0B;
+        }
+
+
         .config-info {
             background: rgba(66, 153, 225, 0.1);
             border: 1px solid rgba(66, 153, 225, 0.2);
@@ -834,7 +916,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caseid'])) {
                     <!-- Alert Messages -->
                     <?php if ($message): ?>
                         <div class="alert-message alert-<?php echo $messageType; ?>">
-                            <i class="fas fa-<?php echo $messageType === 'success' ? 'check-circle' : 'exclamation-triangle'; ?> me-2"></i>
+                            <i class="fas fa-<?php 
+                                        echo $messageType === 'success' ? 'check-circle' : 
+                                            ($messageType === 'warning' ? 'info-circle' : 'exclamation-triangle'); 
+                                    ?> me-2"></i>
                             <?php echo htmlspecialchars($message); ?>
                         </div>
                     <?php endif; ?>
