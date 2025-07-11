@@ -4,7 +4,7 @@ ini_set('display_errors', 1);
 
 // Configuration Constants - Update these with your values
 define('TENANT_ID', 'x');
-define('CLIENT_ID', 'w');
+define('CLIENT_ID', 'y');
 define('CLIENT_SECRET', 'z');
 define('SHAREPOINT_SITE_ID', '11adac3a-680d-4a72-9acf-6699524b1d7f'); // Or use site URL format
 define('DOCUMENT_LIBRARY_NAME', 'CasesandIncidentsFiles'); // Name of your document library
@@ -899,6 +899,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caseid'])) {
                 <!-- Form Content -->
                 <div class="form-content">
                     <!-- Configuration Info -->
+                     <!--
                     <div class="config-info">
                         <strong><i class="fas fa-cog me-2"></i>Configuration Status:</strong><br>
                         <?php foreach ($GLOBALS['debug_info']['config'] as $key => $value): ?>
@@ -907,11 +908,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caseid'])) {
                             </span><br>
                         <?php endforeach; ?>
                     </div>
-
+                        -->
                     <!-- Always show complete debug info -->
+                     <!--
                     <?php if ($showDebug): ?>
                         <?php echo displayDebugInfo($GLOBALS['debug_info']); ?>
                     <?php endif; ?>
+                    -->
 
                     <!-- Alert Messages -->
                     <?php if ($message): ?>
