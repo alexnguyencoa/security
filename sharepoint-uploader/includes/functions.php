@@ -1,5 +1,6 @@
 <?php
 // includes/functions.php - SharePoint Functions
+// author - Alex Nguyen
 
 /**
  * Get Microsoft Graph API access token
@@ -298,8 +299,9 @@ function createSharePointFolder($folderName, $accessToken) {
     ];
 }
 
+
 /**
- * Create upload session for direct upload
+ * Create upload session for direct upload (FIXED VERSION)
  * @param string $folderName
  * @param string $fileName
  * @param string $accessToken
@@ -313,8 +315,9 @@ function createUploadSession($folderName, $fileName, $accessToken) {
     
     $driveId = $drive['id'];
     
-    // Sanitize filename for SharePoint
-    $sanitizedFileName = sanitizeFileName($fileName);
+    // Sanitize filename for SharePoint - FIXED to handle array return
+    $sanitizationResult = sanitizeFileName($fileName);
+    $sanitizedFileName = $sanitizationResult['sanitized']; // Extract the sanitized filename from array
     
     $uploadSessionUrl = "https://graph.microsoft.com/v1.0/drives/{$driveId}/root:/{$folderName}/{$sanitizedFileName}:/createUploadSession";
     
@@ -346,7 +349,9 @@ function createUploadSession($folderName, $fileName, $accessToken) {
             'upload_url' => $sessionInfo['uploadUrl'],
             'expiration' => $sessionInfo['expirationDateTime'],
             'drive_name' => $drive['name'],
-            'sanitized_filename' => $sanitizedFileName
+            'sanitized_filename' => $sanitizedFileName,
+            'original_filename' => $fileName,
+            'filename_changed' => $sanitizationResult['changes_made']
         ];
     }
     
@@ -359,20 +364,262 @@ function createUploadSession($folderName, $fileName, $accessToken) {
 }
 
 /**
- * Sanitize filename for SharePoint compatibility
- * @param string $fileName
- * @return string Sanitized filename
+ * Sanitize filename for SharePoint compatibility with best practices
+ * @param string $fileName Original filename
+ * @param bool $preserveSpaces Whether to preserve spaces (default: false, converts to underscores)
+ * @return array Array with 'sanitized' filename and 'changes_made' flag
  */
-function sanitizeFileName($fileName) {
-    // Remove invalid characters for SharePoint
-    $sanitized = preg_replace('/[<>:"\/\\\\|?*#%&{}~]/', '_', $fileName);
-    $sanitized = trim($sanitized, ' .');
+function sanitizeFileName($fileName, $preserveSpaces = false) {
+    $originalFileName = $fileName;
+    $changesMade = false;
     
-    if (empty($sanitized)) {
-        $sanitized = 'file_' . time();
+    // Extract file extension first
+    $pathInfo = pathinfo($fileName);
+    $extension = isset($pathInfo['extension']) ? '.' . $pathInfo['extension'] : '';
+    $nameWithoutExt = $pathInfo['filename'] ?? $fileName;
+    
+    // Step 1: Handle spaces
+    if (!$preserveSpaces && strpos($nameWithoutExt, ' ') !== false) {
+        $nameWithoutExt = str_replace(' ', '_', $nameWithoutExt);
+        $changesMade = true;
     }
     
-    return $sanitized;
+    // Step 2: Remove/replace SharePoint problematic characters
+    // SharePoint doesn't allow: ~ " # % & * : < > ? / \ { | }
+    // Also problematic: leading/trailing dots and spaces
+    $problematicChars = [
+        '~' => '-',
+        '"' => '',
+        '#' => '',
+        '%' => '',
+        '&' => 'and',
+        '*' => '',
+        ':' => '-',
+        '<' => '',
+        '>' => '',
+        '?' => '',
+        '/' => '-',
+        '\\' => '-',
+        '{' => '',
+        '}' => '',
+        '|' => '-'
+    ];
+    
+    $originalName = $nameWithoutExt;
+    foreach ($problematicChars as $char => $replacement) {
+        if (strpos($nameWithoutExt, $char) !== false) {
+            $nameWithoutExt = str_replace($char, $replacement, $nameWithoutExt);
+            $changesMade = true;
+        }
+    }
+    
+    // Step 3: Remove multiple consecutive underscores/hyphens
+    if (preg_match('/[_-]{2,}/', $nameWithoutExt)) {
+        $nameWithoutExt = preg_replace('/[_-]+/', '_', $nameWithoutExt);
+        $changesMade = true;
+    }
+    
+    // Step 4: Trim leading/trailing dots, spaces, underscores, hyphens
+    $trimmed = trim($nameWithoutExt, ' .-_');
+    if ($trimmed !== $nameWithoutExt) {
+        $nameWithoutExt = $trimmed;
+        $changesMade = true;
+    }
+    
+    // Step 5: Handle reserved Windows names
+    $reservedNames = [
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+    ];
+    
+    if (in_array(strtoupper($nameWithoutExt), $reservedNames)) {
+        $nameWithoutExt = $nameWithoutExt . '_file';
+        $changesMade = true;
+    }
+    
+    // Step 6: Ensure filename isn't empty
+    if (empty($nameWithoutExt)) {
+        $nameWithoutExt = 'file_' . time();
+        $changesMade = true;
+    }
+    
+    // Step 7: Limit length (SharePoint has 255 char limit for full path)
+    $maxNameLength = 100; // Conservative limit for filename part
+    if (strlen($nameWithoutExt) > $maxNameLength) {
+        $nameWithoutExt = substr($nameWithoutExt, 0, $maxNameLength);
+        $nameWithoutExt = rtrim($nameWithoutExt, '.-_ ');
+        $changesMade = true;
+    }
+    
+    $sanitizedFileName = $nameWithoutExt . $extension;
+    
+    return [
+        'sanitized' => $sanitizedFileName,
+        'original' => $originalFileName,
+        'changes_made' => $changesMade,
+        'safe_for_sharepoint' => true
+    ];
+}
+
+/**
+ * URL encode filename for API calls while preserving readability
+ * @param string $fileName Sanitized filename
+ * @return string URL-encoded filename
+ */
+function urlEncodeFileName($fileName) {
+    // Only encode characters that are problematic in URLs
+    // Keep letters, numbers, hyphens, underscores, dots, and parentheses
+    return preg_replace_callback('/[^a-zA-Z0-9._()-]/', function($matches) {
+        return rawurlencode($matches[0]);
+    }, $fileName);
+}
+
+/**
+ * Enhanced function that replaces the original createUploadSession
+ * @param string $folderName
+ * @param string $fileName
+ * @param string $accessToken
+ * @return array Result with upload URL or error
+ */
+function createUploadSessionEnhanced($folderName, $fileName, $accessToken) {
+    $drive = getTargetDrive($accessToken);
+    if (!$drive) {
+        return ['success' => false, 'error' => 'No suitable drive found'];
+    }
+    
+    $driveId = $drive['id'];
+    
+    // Sanitize filename with detailed feedback
+    $fileNameResult = sanitizeFileName($fileName);
+    $sanitizedFileName = $fileNameResult['sanitized'];
+    $urlEncodedFileName = urlEncodeFileName($sanitizedFileName);
+    
+    // Log filename changes for debugging
+    $GLOBALS['debug_info']['filename_processing'] = [
+        'original' => $fileName,
+        'sanitized' => $sanitizedFileName,
+        'url_encoded' => $urlEncodedFileName,
+        'changes_made' => $fileNameResult['changes_made']
+    ];
+    
+    $uploadSessionUrl = "https://graph.microsoft.com/v1.0/drives/{$driveId}/root:/{$folderName}/{$urlEncodedFileName}:/createUploadSession";
+    
+    $sessionData = [
+        'item' => [
+            '@microsoft.graph.conflictBehavior' => 'replace'
+        ]
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $uploadSessionUrl);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($sessionData));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Authorization: Bearer ' . $accessToken,
+        'Content-Type: application/json'
+    ]);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+    
+    // Enhanced debugging for upload session creation
+    $GLOBALS['debug_info']['upload_session'] = [
+        'url' => $uploadSessionUrl,
+        'http_code' => $httpCode,
+        'curl_error' => $curlError,
+        'response_length' => strlen($response)
+    ];
+    
+    if ($httpCode === 200 || $httpCode === 201) {
+        $sessionInfo = json_decode($response, true);
+        return [
+            'success' => true,
+            'upload_url' => $sessionInfo['uploadUrl'],
+            'expiration' => $sessionInfo['expirationDateTime'],
+            'drive_name' => $drive['name'],
+            'original_filename' => $fileName,
+            'sanitized_filename' => $sanitizedFileName,
+            'filename_changed' => $fileNameResult['changes_made']
+        ];
+    }
+    
+    $responseData = json_decode($response, true);
+    return [
+        'success' => false,
+        'error' => $responseData['error']['message'] ?? 'Failed to create upload session',
+        'http_code' => $httpCode,
+        'debug_info' => $GLOBALS['debug_info']
+    ];
+}
+
+/**
+ * Batch sanitize multiple filenames and return summary
+ * @param array $fileNames Array of filenames
+ * @return array Summary of sanitization results
+ */
+function batchSanitizeFileNames($fileNames) {
+    $results = [
+        'files' => [],
+        'total_files' => count($fileNames),
+        'files_changed' => 0,
+        'potential_conflicts' => []
+    ];
+    
+    $sanitizedNames = [];
+    
+    foreach ($fileNames as $fileName) {
+        $result = sanitizeFileName($fileName);
+        $results['files'][] = $result;
+        
+        if ($result['changes_made']) {
+            $results['files_changed']++;
+        }
+        
+        // Check for potential conflicts (same sanitized name)
+        if (in_array($result['sanitized'], $sanitizedNames)) {
+            $results['potential_conflicts'][] = $result['sanitized'];
+        } else {
+            $sanitizedNames[] = $result['sanitized'];
+        }
+    }
+    
+    return $results;
+}
+
+/**
+ * Generate user-friendly message about filename changes
+ * @param array $sanitizationResults Results from batchSanitizeFileNames
+ * @return string HTML message for user
+ */
+function generateFileNameChangeMessage($sanitizationResults) {
+    if ($sanitizationResults['files_changed'] === 0) {
+        return '<div class="alert alert-success"><i class="fas fa-check-circle me-2"></i>All filenames are SharePoint compatible.</div>';
+    }
+    
+    $message = '<div class="alert alert-warning">';
+    $message .= '<i class="fas fa-info-circle me-2"></i>';
+    $message .= '<strong>Filename Changes:</strong> ';
+    $message .= $sanitizationResults['files_changed'] . ' of ' . $sanitizationResults['total_files'] . ' files will be renamed for SharePoint compatibility.<br>';
+    
+    $message .= '<small class="mt-2 d-block"><strong>Changes made:</strong><ul class="mb-0">';
+    foreach ($sanitizationResults['files'] as $file) {
+        if ($file['changes_made']) {
+            $message .= '<li>' . htmlspecialchars($file['original']) . ' → ' . htmlspecialchars($file['sanitized']) . '</li>';
+        }
+    }
+    $message .= '</ul></small>';
+    
+    if (!empty($sanitizationResults['potential_conflicts'])) {
+        $message .= '<div class="text-danger mt-2"><strong>Warning:</strong> Some files may have the same name after sanitization: ' . implode(', ', $sanitizationResults['potential_conflicts']) . '</div>';
+    }
+    
+    $message .= '</div>';
+    return $message;
 }
 
 /**
