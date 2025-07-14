@@ -1,4 +1,5 @@
-// assets/js/uploader.js - SharePoint Direct Upload
+// Enhanced uploader.js with filename sanitization preview
+// author - Alex Nguyen
 
 /**
  * Configuration and constants
@@ -11,7 +12,94 @@ const UPLOAD_CONFIG = {
 };
 
 /**
- * File validation function
+ * Client-side filename sanitization (mirrors PHP logic)
+ * @param {string} fileName - Original filename
+ * @returns {Object} Sanitization result
+ */
+function sanitizeFileNameJS(fileName) {
+    const originalFileName = fileName;
+    let changesMade = false;
+    
+    // Extract extension
+    const lastDotIndex = fileName.lastIndexOf('.');
+    let extension = '';
+    let nameWithoutExt = fileName;
+    
+    if (lastDotIndex > 0) {
+        extension = fileName.substring(lastDotIndex);
+        nameWithoutExt = fileName.substring(0, lastDotIndex);
+    }
+    
+    // Handle spaces - convert to underscores
+    if (nameWithoutExt.includes(' ')) {
+        nameWithoutExt = nameWithoutExt.replace(/ /g, '_');
+        changesMade = true;
+    }
+    
+    // Replace problematic characters
+    const problematicChars = {
+        '~': '-', '"': '', '#': '', '%': '', '&': 'and', '*': '',
+        ':': '-', '<': '', '>': '', '?': '', '/': '-', '\\': '-',
+        '{': '', '}': '', '|': '-'
+    };
+    
+    for (const [char, replacement] of Object.entries(problematicChars)) {
+        if (nameWithoutExt.includes(char)) {
+            nameWithoutExt = nameWithoutExt.replace(new RegExp('\\' + char, 'g'), replacement);
+            changesMade = true;
+        }
+    }
+    
+    // Remove multiple consecutive underscores/hyphens
+    if (/[_-]{2,}/.test(nameWithoutExt)) {
+        nameWithoutExt = nameWithoutExt.replace(/[_-]+/g, '_');
+        changesMade = true;
+    }
+    
+    // Trim problematic characters from edges
+    const trimmed = nameWithoutExt.replace(/^[ .\-_]+|[ .\-_]+$/g, '');
+    if (trimmed !== nameWithoutExt) {
+        nameWithoutExt = trimmed;
+        changesMade = true;
+    }
+    
+    // Check reserved names
+    const reservedNames = [
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+    ];
+    
+    if (reservedNames.includes(nameWithoutExt.toUpperCase())) {
+        nameWithoutExt = nameWithoutExt + '_file';
+        changesMade = true;
+    }
+    
+    // Ensure not empty
+    if (!nameWithoutExt) {
+        nameWithoutExt = 'file_' + Date.now();
+        changesMade = true;
+    }
+    
+    // Limit length
+    if (nameWithoutExt.length > 100) {
+        nameWithoutExt = nameWithoutExt.substring(0, 100).replace(/[ .\-_]+$/, '');
+        changesMade = true;
+    }
+    
+    const sanitizedFileName = nameWithoutExt + extension;
+    
+    return {
+        original: originalFileName,
+        sanitized: sanitizedFileName,
+        changes_made: changesMade,
+        name_without_ext: nameWithoutExt,
+        extension: extension
+    };
+}
+
+/**
+ * Enhanced file validation with filename sanitization preview
  * @param {HTMLInputElement} input - File input element
  */
 function validateFiles(input) {
@@ -27,8 +115,41 @@ function validateFiles(input) {
     let errorMessages = [];
     let warningMessages = [];
     
+    // Process filename sanitization for all files
+    const fileProcessingResults = [];
+    const sanitizedNames = new Set();
+    let duplicateNames = [];
+    
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const sanitizationResult = sanitizeFileNameJS(file.name);
+        fileProcessingResults.push({
+            file: file,
+            sanitization: sanitizationResult
+        });
+        
+        // Check for duplicates after sanitization
+        if (sanitizedNames.has(sanitizationResult.sanitized.toLowerCase())) {
+            duplicateNames.push(sanitizationResult.sanitized);
+        } else {
+            sanitizedNames.add(sanitizationResult.sanitized.toLowerCase());
+        }
+    }
+    
     // Show info about direct upload
     warningMessages.push('ℹ️ Using direct upload - no server file size limits!');
+    
+    // Show filename changes warning if any
+    const changedFiles = fileProcessingResults.filter(result => result.sanitization.changes_made);
+    if (changedFiles.length > 0) {
+        warningMessages.push(`📝 ${changedFiles.length} filename(s) will be modified for SharePoint compatibility`);
+    }
+    
+    // Show duplicate warning
+    if (duplicateNames.length > 0) {
+        errorMessages.push(`⚠️ Duplicate filenames after sanitization: ${duplicateNames.join(', ')}`);
+        isValid = false;
+    }
     
     // Check number of files
     if (files.length === 0) {
@@ -42,8 +163,8 @@ function validateFiles(input) {
     let totalSize = 0;
     
     // Validate each file
-    for (let i = 0; i < files.length; i++) {
-        const file = files[i];
+    for (let result of fileProcessingResults) {
+        const file = result.file;
         const fileName = file.name;
         const fileSize = file.size;
         const fileSizeMB = Math.round(fileSize / 1024 / 1024 * 100) / 100;
@@ -65,7 +186,7 @@ function validateFiles(input) {
     }
     
     // Display feedback
-    displayValidationFeedback(feedbackDiv, selectedFilesDiv, files, isValid, errorMessages, warningMessages, totalSize);
+    displayValidationFeedback(feedbackDiv, selectedFilesDiv, fileProcessingResults, isValid, errorMessages, warningMessages, totalSize);
     
     // Set custom validity
     if (!isValid) {
@@ -76,16 +197,16 @@ function validateFiles(input) {
 }
 
 /**
- * Display validation feedback
+ * Enhanced validation feedback display
  */
-function displayValidationFeedback(feedbackDiv, selectedFilesDiv, files, isValid, errorMessages, warningMessages, totalSize) {
+function displayValidationFeedback(feedbackDiv, selectedFilesDiv, fileProcessingResults, isValid, errorMessages, warningMessages, totalSize) {
     let feedbackHtml = '';
     
     if (warningMessages.length > 0) {
         feedbackHtml += `
             <div class="alert alert-info">
                 <i class="fas fa-info-circle me-2"></i>
-                <strong>Upload Method:</strong>
+                <strong>Upload Information:</strong>
                 <ul class="mb-0 mt-2">
                     ${warningMessages.map(msg => `<li>${msg}</li>`).join('')}
                 </ul>
@@ -104,13 +225,13 @@ function displayValidationFeedback(feedbackDiv, selectedFilesDiv, files, isValid
             </div>
         `;
     } else {
-        // Show selected files
-        selectedFilesDiv.innerHTML = generateSelectedFilesHtml(files);
+        // Show selected files with filename changes
+        selectedFilesDiv.innerHTML = generateSelectedFilesHtml(fileProcessingResults);
         
         feedbackHtml += `
             <div class="alert alert-success">
                 <i class="fas fa-check-circle me-2"></i>
-                ${files.length} file(s) ready for direct upload (${(totalSize / 1024 / 1024).toFixed(1)}MB total).
+                ${fileProcessingResults.length} file(s) ready for direct upload (${(totalSize / 1024 / 1024).toFixed(1)}MB total).
             </div>
         `;
     }
@@ -119,24 +240,63 @@ function displayValidationFeedback(feedbackDiv, selectedFilesDiv, files, isValid
 }
 
 /**
- * Generate HTML for selected files display
+ * Enhanced selected files display with filename changes
  */
-function generateSelectedFilesHtml(files) {
-    let filesHtml = '<div class="selected-files-container"><h6 class="text-success"><i class="fas fa-check-circle me-2"></i>Selected Files:</h6><div class="row">';
+function generateSelectedFilesHtml(fileProcessingResults) {
+    if (fileProcessingResults.length === 0) return '';
     
-    for (let i = 0; i < files.length; i++) {
-        const file = files[i];
+    let filesHtml = '<div class="selected-files-container">';
+    filesHtml += '<h6 class="text-success"><i class="fas fa-check-circle me-2"></i>Selected Files:</h6>';
+    
+    // Show filename changes summary if any
+    const changedFiles = fileProcessingResults.filter(result => result.sanitization.changes_made);
+    if (changedFiles.length > 0) {
+        filesHtml += `
+            <div class="alert alert-warning py-2 mb-3">
+                <small><i class="fas fa-edit me-1"></i>
+                <strong>Filename Changes:</strong> ${changedFiles.length} file(s) will be renamed for SharePoint compatibility.
+                </small>
+            </div>
+        `;
+    }
+    
+    filesHtml += '<div class="row">';
+    
+    for (let result of fileProcessingResults) {
+        const file = result.file;
+        const sanitization = result.sanitization;
         const fileSizeMB = (file.size / 1024 / 1024).toFixed(1);
         const fileExtension = file.name.split('.').pop().toLowerCase();
         const isImage = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp'].includes(fileExtension);
         const icon = isImage ? 'fa-file-image' : 'fa-file-video';
         
+        const borderClass = sanitization.changes_made ? 'border-warning' : 'border';
+        const bgClass = sanitization.changes_made ? 'bg-warning bg-opacity-10' : '';
+        
         filesHtml += `
             <div class="col-md-6 mb-2">
-                <div class="file-item p-2 border rounded">
-                    <i class="fas ${icon} me-2 text-primary"></i>
-                    <strong>${file.name}</strong>
-                    <small class="text-muted d-block">${fileSizeMB} MB</small>
+                <div class="file-item p-2 ${borderClass} ${bgClass} rounded">
+                    <div class="d-flex align-items-start">
+                        <i class="fas ${icon} me-2 text-primary mt-1 flex-shrink-0"></i>
+                        <div class="flex-grow-1 min-width-0">
+        `;
+        
+        if (sanitization.changes_made) {
+            filesHtml += `
+                            <div class="text-decoration-line-through text-muted small">${sanitization.original}</div>
+                            <div class="fw-bold text-warning">→ ${sanitization.sanitized}</div>
+                            <small class="text-muted">${fileSizeMB} MB • <span class="text-warning">renamed</span></small>
+            `;
+        } else {
+            filesHtml += `
+                            <div class="fw-bold">${sanitization.original}</div>
+                            <small class="text-muted">${fileSizeMB} MB</small>
+            `;
+        }
+        
+        filesHtml += `
+                        </div>
+                    </div>
                 </div>
             </div>
         `;
@@ -147,7 +307,7 @@ function generateSelectedFilesHtml(files) {
 }
 
 /**
- * SharePoint Direct Upload Class
+ * SharePoint Direct Upload Class (Enhanced)
  */
 class SharePointDirectUpload {
     constructor() {
@@ -155,16 +315,14 @@ class SharePointDirectUpload {
     }
 
     /**
-     * Upload files to SharePoint
-     * @param {string} caseId - Case ID for folder name
-     * @param {File[]} files - Array of files to upload
-     * @returns {Object} Upload results
+     * Upload files to SharePoint with enhanced filename handling
      */
     async uploadFiles(caseId, files) {
         const results = {
             success: [],
             failed: [],
-            errors: []
+            errors: [],
+            filename_changes: []
         };
 
         this.showProgressContainer();
@@ -189,12 +347,29 @@ class SharePointDirectUpload {
         // Upload each file
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
+            const sanitization = sanitizeFileNameJS(file.name);
+            
+            if (sanitization.changes_made) {
+                results.filename_changes.push({
+                    original: sanitization.original,
+                    sanitized: sanitization.sanitized
+                });
+                this.addStatusMessage(
+                    `File renamed: "${sanitization.original}" → "${sanitization.sanitized}"`, 
+                    'info'
+                );
+            }
+            
             this.updateProgress(file.name, 0, 'Getting upload URL...');
 
             try {
-                const success = await this.uploadSingleFile(caseId, file);
+                const success = await this.uploadSingleFile(caseId, file, sanitization.sanitized);
                 if (success) {
-                    results.success.push(file.name);
+                    results.success.push({
+                        original_name: file.name,
+                        final_name: sanitization.sanitized,
+                        size: file.size
+                    });
                     this.updateProgress(file.name, 100, 'Complete ✓');
                 } else {
                     results.failed.push(file.name);
@@ -211,9 +386,37 @@ class SharePointDirectUpload {
     }
 
     /**
+     * Upload a single file with custom sanitized name
+     */
+    async uploadSingleFile(folderName, file, sanitizedFileName = null) {
+        const finalFileName = sanitizedFileName || file.name;
+        
+        // Get upload URL from PHP API
+        const urlResponse = await fetch('includes/direct_upload_api.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                action: 'get_upload_url',
+                folderName: folderName,
+                fileName: finalFileName
+            })
+        });
+
+        const urlData = await urlResponse.json();
+        if (!urlResponse.ok || !urlData.success) {
+            throw new Error(urlData.error || 'Failed to get upload URL');
+        }
+
+        // Upload file directly to SharePoint
+        return await this.uploadToSharePoint(file, urlData.upload_url);
+    }
+
+    // ... rest of the SharePoint upload methods remain the same ...
+    
+    /**
      * Create folder in SharePoint
-     * @param {string} folderName - Name of folder to create
-     * @returns {Object} Folder creation result
      */
     async createFolder(folderName) {
         const response = await fetch('includes/direct_upload_api.php', {
@@ -235,39 +438,7 @@ class SharePointDirectUpload {
     }
 
     /**
-     * Upload a single file
-     * @param {string} folderName - Target folder name
-     * @param {File} file - File to upload
-     * @returns {boolean} Success status
-     */
-    async uploadSingleFile(folderName, file) {
-        // Get upload URL from PHP API
-        const urlResponse = await fetch('includes/direct_upload_api.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                action: 'get_upload_url',
-                folderName: folderName,
-                fileName: file.name
-            })
-        });
-
-        const urlData = await urlResponse.json();
-        if (!urlResponse.ok || !urlData.success) {
-            throw new Error(urlData.error || 'Failed to get upload URL');
-        }
-
-        // Upload file directly to SharePoint
-        return await this.uploadToSharePoint(file, urlData.upload_url);
-    }
-
-    /**
      * Upload file to SharePoint using resumable upload
-     * @param {File} file - File to upload
-     * @param {string} uploadUrl - SharePoint upload URL
-     * @returns {boolean} Success status
      */
     async uploadToSharePoint(file, uploadUrl) {
         // For small files (under 4MB), upload in one piece
@@ -313,20 +484,8 @@ class SharePointDirectUpload {
                 throw new Error(`Upload chunk ${i + 1} failed: ${response.status} ${response.statusText}`);
             }
 
-            // For the last chunk, we should get the final response
             if (i === totalChunks - 1) {
                 return true;
-            } else {
-                // Check if we need to continue
-                try {
-                    const responseData = await response.json();
-                    if (!responseData.nextExpectedRanges) {
-                        // Upload complete earlier than expected
-                        return true;
-                    }
-                } catch (e) {
-                    // Some responses might not be JSON, continue
-                }
             }
         }
 
@@ -361,8 +520,6 @@ class SharePointDirectUpload {
 
     /**
      * Add status message
-     * @param {string} message - Message to display
-     * @param {string} type - Message type (info, success, error)
      */
     addStatusMessage(message, type) {
         const statusContainer = document.getElementById('upload-status-messages');
@@ -382,9 +539,6 @@ class SharePointDirectUpload {
 
     /**
      * Update progress for a file
-     * @param {string} fileName - Name of file
-     * @param {number} percent - Progress percentage
-     * @param {string} status - Status message
      */
     updateProgress(fileName, percent, status) {
         this.uploadProgress.set(fileName, { percent, status });
@@ -420,7 +574,7 @@ class SharePointDirectUpload {
 }
 
 /**
- * Handle form submission
+ * Enhanced form submission handler
  */
 function initializeUploader() {
     const form = document.getElementById('caseFolderForm');
@@ -481,28 +635,31 @@ function initializeUploader() {
             // Re-enable form
             submitButton.disabled = false;
             buttonIcon.className = 'fas fa-folder-plus me-2';
-            buttonText.textContent = 'Create Folder';
+            buttonText.textContent = 'Create Folder & Upload Files';
         }
     });
 }
 
 /**
- * Display upload results
- * @param {Object} results - Upload results
- * @param {string} caseId - Case ID
+ * Enhanced upload results display
  */
 function displayUploadResults(results, caseId) {
     let message = '';
     let messageType = '';
     
     if (results.success.length > 0 && results.failed.length === 0) {
-        message = `All ${results.success.length} files uploaded successfully to folder '${caseId}'!<br>` +
-                 `<strong>Files:</strong> ${results.success.join(', ')}`;
+        message = `All ${results.success.length} files uploaded successfully to folder '${caseId}'!<br>`;
+        
+        if (results.filename_changes.length > 0) {
+            message += `<br><strong>Filename Changes:</strong><br>`;
+            for (let change of results.filename_changes) {
+                message += `• "${change.original}" → "${change.sanitized}"<br>`;
+            }
+        }
+        
         messageType = 'success';
     } else if (results.success.length > 0) {
-        message = `${results.success.length} files uploaded, ${results.failed.length} failed.<br>` +
-                 `<strong>Success:</strong> ${results.success.join(', ')}<br>` +
-                 `<strong>Failed:</strong> ${results.failed.join(', ')}`;
+        message = `${results.success.length} files uploaded, ${results.failed.length} failed.<br>`;
         if (results.errors.length > 0) {
             message += `<br><strong>Errors:</strong> ${results.errors.join('; ')}`;
         }
@@ -520,8 +677,6 @@ function displayUploadResults(results, caseId) {
 
 /**
  * Show alert message
- * @param {string} message - Message to show
- * @param {string} type - Alert type
  */
 function showAlert(message, type) {
     const alertHtml = `
